@@ -9,9 +9,10 @@ from search import get_search_results
 import config as _robin_cfg
 from llm_utils import BufferedStreamingHandler, get_model_choices, get_model_display_names
 from llm import (
-    get_llm, refine_query, filter_results, generate_summary, PRESET_PROMPTS,
+    get_llm, get_pi_gateway_llm, refine_query, filter_results, generate_summary, PRESET_PROMPTS,
     answer_followup, suggest_pivots, build_followup_context,
 )
+from pi_gateway import complete_with_gateway, configured_gateway_url, fetch_robin_config, get_workbench_cookie
 from langchain_core.messages import HumanMessage, AIMessage
 from config import (
     OPENAI_API_KEY,
@@ -153,8 +154,47 @@ _robin_cfg.CUSTOM_API_BASE_URL = st.session_state["custom_api_url"].strip() or N
 _robin_cfg.CUSTOM_API_KEY = st.session_state["custom_api_key"].strip() or None
 _robin_cfg.CUSTOM_API_MODEL = st.session_state["custom_api_model"].strip() or None
 
-model_options = get_model_choices()
-model_display_names = get_model_display_names(model_options)
+gateway_url = configured_gateway_url()
+gateway_cookie = get_workbench_cookie(st)
+gateway_config = None
+gateway_error = None
+if gateway_url and gateway_cookie:
+    try:
+        gateway_config = fetch_robin_config(gateway_cookie, base_url=gateway_url)
+    except Exception as err:
+        gateway_error = str(err)
+
+# 无工作台 Robin 配置时，仍然允许在当前会话填写一个 OpenAI-compatible provider。
+# 必须在 model_options 为空的分支之前渲染，首次使用才不会被 st.stop() 截断。
+if not gateway_config:
+    with st.sidebar.expander("🔌 Custom API Provider"):
+        st.text_input(
+            "Base URL",
+            key="custom_api_url",
+            placeholder="https://api.groq.com/openai/v1",
+            help="Base URL for any OpenAI-compatible API (Groq, Mistral, LM Studio, etc.)",
+        )
+        st.text_input(
+            "API Key",
+            key="custom_api_key",
+            type="password",
+            help="API key for the custom provider (leave blank if not required)",
+        )
+        st.text_input(
+            "Model Name",
+            key="custom_api_model",
+            placeholder="llama-3.3-70b-versatile",
+            help="Model to use. Required if the provider doesn't expose /v1/models for auto-discovery.",
+        )
+
+if gateway_config:
+    model_options = [gateway_config["model"]]
+    model_display_names = {
+        gateway_config["model"]: f"[Pi AI] {gateway_config['provider']} / {gateway_config['model']}",
+    }
+else:
+    model_options = get_model_choices()
+    model_display_names = get_model_display_names(model_options)
 default_model_index = (
     next(
         (idx for idx, name in enumerate(model_options) if name.lower() == "gpt4o"),
@@ -167,10 +207,11 @@ default_model_index = (
 if not model_options:
     st.sidebar.error(
         "⛔ **No LLM models available.**\n\n"
-        "No API keys or local providers are configured. "
-        "Set at least one in your `.env` file and restart Robin.\n\n"
-        "See **Provider Configuration** below for details."
+        "请在工作台的 **Agent 设置 → Robin** 保存 Provider、模型和 API Key，"
+        "或展开上方 **Custom API Provider** 填写兼容接口。"
     )
+    if gateway_error:
+        st.sidebar.caption(f"网关状态：{gateway_error}")
     st.stop()
 
 model = st.sidebar.selectbox(
@@ -180,28 +221,14 @@ model = st.sidebar.selectbox(
     index=default_model_index,
     key="model_select",
 )
-if any(name not in {"gpt4o", "gpt-4.1", "claude-3-5-sonnet-latest", "llama3.1", "gemini-2.5-flash"} for name in model_options):
+if not gateway_config and any(name not in {"gpt4o", "gpt-4.1", "claude-3-5-sonnet-latest", "llama3.1", "gemini-2.5-flash"} for name in model_options):
     st.sidebar.caption("Locally detected Ollama models are automatically added to this list.")
 
-with st.sidebar.expander("🔌 Custom API Provider"):
-    st.text_input(
-        "Base URL",
-        key="custom_api_url",
-        placeholder="https://api.groq.com/openai/v1",
-        help="Base URL for any OpenAI-compatible API (Groq, Mistral, LM Studio, etc.)",
-    )
-    st.text_input(
-        "API Key",
-        key="custom_api_key",
-        type="password",
-        help="API key for the custom provider (leave blank if not required)",
-    )
-    st.text_input(
-        "Model Name",
-        key="custom_api_model",
-        placeholder="llama-3.3-70b-versatile",
-        help="Model to use. Required if the provider doesn't expose /v1/models for auto-discovery.",
-    )
+def get_selected_llm(model_choice):
+    if gateway_config:
+        return get_pi_gateway_llm(gateway_cookie, gateway_url)
+    return get_llm(model_choice)
+
 threads = st.sidebar.slider("Scraping Threads", 1, 16, 4, key="thread_slider")
 max_results = st.sidebar.slider(
     "Max Results to Filter", 10, 100, 50, key="max_results_slider",
@@ -214,6 +241,10 @@ max_scrape = st.sidebar.slider(
 
 st.sidebar.divider()
 st.sidebar.subheader("Provider Configuration")
+if gateway_config:
+    st.sidebar.markdown(
+        f"&ensp;✅ **Pi AI Gateway** — {gateway_config['provider']} / {gateway_config['model']}"
+    )
 _providers = [
     ("OpenAI",      OPENAI_API_KEY,     True),
     ("Anthropic",   ANTHROPIC_API_KEY,  True),
@@ -271,15 +302,25 @@ st.sidebar.subheader("Health Checks")
 if st.sidebar.button("🔌 Check LLM Connection", use_container_width=True):
     with st.sidebar:
         with st.spinner(f"Testing {model}..."):
-            result = check_llm_health(model)
+            if gateway_config:
+                try:
+                    complete_with_gateway(
+                        gateway_cookie,
+                        "Reply with exactly OK.",
+                        [{"role": "user", "content": "ping"}],
+                        base_url=gateway_url,
+                    )
+                    result = {"status": "up", "provider": "Pi AI Gateway", "latency_ms": None}
+                except Exception as err:
+                    result = {"status": "down", "provider": "Pi AI Gateway", "error": str(err)}
+            else:
+                result = check_llm_health(model)
         if result["status"] == "up":
-            st.sidebar.success(
-                f"✅ **{result['provider']}** — Connected ({result['latency_ms']}ms)"
-            )
+            latency = result.get("latency_ms")
+            suffix = f" ({latency}ms)" if latency is not None else ""
+            st.sidebar.success(f"✅ **{result['provider']}** — Connected{suffix}")
         else:
-            st.sidebar.error(
-                f"❌ **{result['provider']}** — Failed\n\n{result['error']}"
-            )
+            st.sidebar.error(f"❌ **{result['provider']}** — Failed\n\n{result['error']}")
 
 # Search Engine Health Check
 if st.sidebar.button("🔍 Check Search Engines", use_container_width=True):
@@ -474,8 +515,9 @@ def _render_chat_panel(inv):
                 answer_slot.markdown(acc["text"])
 
             try:
-                f_llm = get_llm(inv.get("model"))
-                f_llm.callbacks = [BufferedStreamingHandler(ui_callback=_emit)]
+                f_llm = get_selected_llm(inv.get("model"))
+                if not gateway_config:
+                    f_llm.callbacks = [BufferedStreamingHandler(ui_callback=_emit)]
                 answer = answer_followup(
                     f_llm, followup, context, history=history,
                     preset=inv.get("preset", "threat_intel"),
@@ -511,7 +553,7 @@ if _do_run:
     with status_slot.container():
         with st.spinner("🔄 Loading LLM..."):
             try:
-                llm = get_llm(model)
+                llm = get_selected_llm(model)
             except Exception as e:
                 _render_pipeline_error("load the selected LLM", e)
 
@@ -576,7 +618,8 @@ if _do_run:
     with status_slot.container():
         with st.spinner("✍️ Generating summary..."):
             stream_handler = BufferedStreamingHandler(ui_callback=ui_emit)
-            llm.callbacks = [stream_handler]
+            if not gateway_config:
+                llm.callbacks = [stream_handler]
             summary_text = generate_summary(
                 llm, query, st.session_state.scraped,
                 preset=selected_preset, custom_instructions=custom_instructions,
@@ -650,7 +693,7 @@ if _do_run:
     with st.spinner("💡 Suggesting pivots..."):
         try:
             st.session_state["pivot_suggestions"] = suggest_pivots(
-                get_llm(model), query, st.session_state.scraped, preset=selected_preset,
+                get_selected_llm(model), query, st.session_state.scraped, preset=selected_preset,
             )
         except Exception:
             st.session_state["pivot_suggestions"] = []

@@ -3,7 +3,11 @@ import json
 import openai
 from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 from langchain_core.output_parsers import StrOutputParser
+from langchain_core.messages import AIMessage
+from langchain_core.runnables import RunnableLambda
 from llm_utils import _common_llm_params, resolve_model_config, get_model_choices
+from pi_gateway import complete_with_gateway
+from pi_gateway_adapter import prompt_messages_to_gateway
 from config import (
     OPENAI_API_KEY,
     ANTHROPIC_API_KEY,
@@ -43,6 +47,22 @@ def get_llm(model_choice):
     llm_instance = llm_class(**all_params)
 
     return llm_instance
+
+
+def get_pi_gateway_llm(session_cookie: str, gateway_url: str):
+    """Return a LangChain runnable backed by pi-ai while keeping Robin's chains unchanged."""
+    def _invoke(prompt):
+        prompt_messages = prompt.to_messages() if hasattr(prompt, "to_messages") else prompt
+        system_prompt, messages = prompt_messages_to_gateway(prompt_messages)
+        text = complete_with_gateway(
+            session_cookie,
+            system_prompt,
+            messages,
+            base_url=gateway_url,
+        )
+        return AIMessage(content=text)
+
+    return RunnableLambda(_invoke)
 
 
 def _ensure_credentials(model_choice: str, llm_class, model_params: dict) -> None:
