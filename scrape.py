@@ -57,6 +57,8 @@ def _build_session(use_tor=False):
     session.mount("https://", adapter)
 
     if use_tor:
+        # 忽略环境变量代理（HTTP_PROXY=mihomo），强制走 Tor SOCKS 代理
+        session.trust_env = False
         session.proxies = {
             "http": "socks5h://127.0.0.1:9050",
             "https": "socks5h://127.0.0.1:9050"

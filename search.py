@@ -46,6 +46,8 @@ DEFAULT_SEARCH_ENGINES = [e["url"] for e in SEARCH_ENGINES]
 
 def get_tor_session():
     session = requests.Session()
+    # 忽略环境变量代理（HTTP_PROXY=mihomo），强制走本会话的 Tor SOCKS 代理
+    session.trust_env = False
     retry = Retry(
         total=3,
         read=3,
