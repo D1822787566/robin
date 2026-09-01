@@ -8,6 +8,7 @@ from langchain_core.runnables import RunnableLambda
 from llm_utils import _common_llm_params, resolve_model_config, get_model_choices
 from pi_gateway import complete_with_gateway
 from pi_gateway_adapter import prompt_messages_to_gateway
+from output_language import chinese_output_prompt
 from config import (
     OPENAI_API_KEY,
     ANTHROPIC_API_KEY,
@@ -105,6 +106,7 @@ def refine_query(llm, user_input):
     3. Don't use any logical operators (AND, OR, etc.)
     4. Keep the final refined query limited to 5 words or less
     5. Output just the user query and nothing else
+    6. Use Simplified Chinese for the final query; keep proper nouns and technical indicators unchanged.
 
     INPUT:
     """
@@ -231,19 +233,19 @@ PRESET_PROMPTS = {
 
     Output Format — respond in Markdown. Render EVERY section below as its own `## Heading` so each is clearly separated, and use bullet points (`-`) for all lists. Do NOT use numbered lists anywhere in the response.
 
-    ## Input Query
+    ## 输入查询
     {query}
 
-    ## Source Links Referenced for Analysis
+    ## 用于分析的来源链接
     - every source link used for the analysis
 
-    ## Investigation Artifacts
+    ## 调查工件
     - each technical artifact with its context (name, email, phone, cryptocurrency address, domain, darkweb market, forum name, threat actor, malware name, TTP, etc.)
 
-    ## Key Insights
+    ## 关键洞察
     - each insight as its own bullet — specific, actionable, and evidence-based
 
-    ## Next Steps
+    ## 后续建议
     - each next investigative step or follow-up search query as its own bullet
 
     INPUT:
@@ -265,22 +267,22 @@ PRESET_PROMPTS = {
 
     Output Format — respond in Markdown. Render EVERY section below as its own `## Heading` so each is clearly separated, and use bullet points (`-`) for all lists. Do NOT use numbered lists anywhere in the response.
 
-    ## Input Query
+    ## 输入查询
     {query}
 
-    ## Source Links Referenced for Analysis
+    ## 用于分析的来源链接
     - every source link used for the analysis
 
-    ## Malware / Ransomware Indicators
+    ## 恶意软件 / 勒索软件指标
     - each indicator as a bullet (hashes, C2s, payload names, TTPs)
 
-    ## Threat Actor Profile
+    ## 威胁行为者概况
     - group name, aliases, known victims, sector targeting — one bullet each
 
-    ## Key Insights
+    ## 关键洞察
     - each insight as its own bullet — focused on threat actor behavior and malware evolution
 
-    ## Next Steps
+    ## 后续建议
     - each hunting query, detection rule, or further investigation step as its own bullet
 
     INPUT:
@@ -301,25 +303,25 @@ PRESET_PROMPTS = {
 
     Output Format — respond in Markdown. Render EVERY section below as its own `## Heading` so each is clearly separated, and use bullet points (`-`) for all lists. Do NOT use numbered lists anywhere in the response.
 
-    ## Input Query
+    ## 输入查询
     {query}
 
-    ## Source Links Referenced for Analysis
+    ## 用于分析的来源链接
     - every source link used for the analysis
 
-    ## Exposed PII Artifacts
+    ## 已暴露的个人信息工件
     - each artifact as a bullet (type, value, source context)
 
-    ## Breach / Marketplace Sources Identified
+    ## 识别到的数据泄露 / 交易来源
     - each breach or marketplace source as a bullet
 
-    ## Exposure Risk Assessment
+    ## 暴露风险评估
     - what data is available and how actionable it is for a threat actor
 
-    ## Key Insights
+    ## 关键洞察
     - each insight on the individual's exposure risk as its own bullet
 
-    ## Next Steps
+    ## 后续建议
     - each protective action or further query as its own bullet
 
     INPUT:
@@ -340,25 +342,25 @@ PRESET_PROMPTS = {
 
     Output Format — respond in Markdown. Render EVERY section below as its own `## Heading` so each is clearly separated, and use bullet points (`-`) for all lists. Do NOT use numbered lists anywhere in the response.
 
-    ## Input Query
+    ## 输入查询
     {query}
 
-    ## Source Links Referenced for Analysis
+    ## 用于分析的来源链接
     - every source link used for the analysis
 
-    ## Leaked Corporate Artifacts
+    ## 泄露的企业工件
     - each artifact as a bullet (credentials, documents, source code, databases)
 
-    ## Threat Actor / Broker Activity
+    ## 威胁行为者 / 中间商活动
     - each threat actor or broker activity as a bullet
 
-    ## Business Impact Assessment
+    ## 业务影响评估
     - competitive or operational damage that could result from the exposure
 
-    ## Key Insights
+    ## 关键洞察
     - each insight on the corporate risk posture as its own bullet
 
-    ## Next Steps
+    ## 后续建议
     - each IR action, legal consideration, or further query as its own bullet
 
     INPUT:
@@ -375,6 +377,7 @@ def generate_summary(llm, query, content, preset="threat_intel", custom_instruct
         # prompt-template variables (same safe pattern as answer_followup).
         system_prompt = system_prompt.rstrip() + "\n\nAdditionally focus on: {custom_focus}"
         invoke_vars["custom_focus"] = custom_instructions.strip()
+    system_prompt = chinese_output_prompt(system_prompt)
     prompt_template = ChatPromptTemplate(
         [("system", system_prompt), ("user", "{content}")]
     )
@@ -393,7 +396,7 @@ _FOLLOWUP_PERSONAS = {
     "corporate_espionage": "a Corporate Intelligence Expert",
 }
 
-_FOLLOWUP_SYSTEM = """
+_FOLLOWUP_SYSTEM = chinese_output_prompt("""
 You are {persona}, answering follow-up questions about a dark web OSINT investigation that has already been completed.
 
 Rules:
@@ -404,7 +407,7 @@ Rules:
 {extra_instructions}
 INVESTIGATION CONTEXT:
 {context}
-"""
+""")
 
 
 def build_followup_context(query, refined, sources, scraped, summary, char_budget=12000):
@@ -468,10 +471,12 @@ def suggest_pivots(llm, query, content, preset="threat_intel", max_pivots=5):
     1. Each query must be 5 words or fewer, with no logical operators (AND, OR, etc.).
     2. Propose between 1 and {max_pivots} queries — only ones grounded in the data.
     3. Output ONLY a JSON array of strings, nothing else. Example: ["query one", "query two"]
+    4. Use Simplified Chinese for each query; preserve proper nouns and technical indicators unchanged.
 
     INVESTIGATION QUERY: {query}
     INVESTIGATION DATA:
     """.replace("{max_pivots}", str(max_pivots))
+    system_prompt = chinese_output_prompt(system_prompt)
 
     raw_content = content if isinstance(content, str) else "\n\n".join(str(x) for x in (content or []))
     prompt_template = ChatPromptTemplate(
